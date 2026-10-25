@@ -4,7 +4,9 @@ Detects programming language and vendor libraries from the project structure
 to automatically filter and prioritize search results.
 """
 
+import fnmatch
 import json
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -62,8 +64,25 @@ VENDOR_PATTERNS = {
             r"Canandcoder",
             r"Canandmag",
         ],
+        "pathplanner": [
+            r"import\s+com\.pathplanner\.lib\.",
+            r"AutoBuilder",
+        ],
+        "advantagekit": [
+            r"import\s+org\.littletonrobotics\.junction\.",
+        ],
+        "yagsl": [
+            r"import\s+swervelib\.",
+        ],
+        "yams": [
+            r"import\s+yams\.",
+        ],
+        "limelight": [
+            r"LimelightHelpers",
+        ],
         "wpilib": [
             r"import\s+edu\.wpi\.first\.",
+            r"import\s+org\.wpilib\.",
             r"import\s+frc\.robot\.",
             r"CommandScheduler",
             r"SubsystemBase",
@@ -127,7 +146,58 @@ VENDORDEP_IDENTIFIERS = {
     "redux": ["ReduxLib", "reduxrobotics"],
     "navx": ["navx", "kauailabs", "studica"],
     "pathplanner": ["pathplannerlib", "PathplannerLib"],
+    "advantagekit": ["AdvantageKit", "littletonrobotics"],
+    # YAGSL and YAMS share a download server, so match their names and packages
+    "yagsl": ["YAGSL", "swervelib"],
+    "yams": ["Yet Another Mechanism System", "yams.yams"],
 }
+
+# Libraries that only show up in a project as a vendordep or an import. When
+# a project has none of one of these, search can skip its docs (a CTRE team
+# rarely wants REV pages). Tools that leave no trace in a project, such as
+# AdvantageScope or a Limelight read over NetworkTables, are never skipped.
+PROJECT_LIBRARIES = {"rev", "ctre", "photonvision", "redux", "pathplanner", "advantagekit", "yagsl", "yams"}
+
+
+def vendors_for_project(detected: list[str], available: list[str]) -> list[str]:
+    """
+    Vendors to search for a project: everything except libraries the
+    project shows no sign of using.
+    """
+    skip = PROJECT_LIBRARIES - set(detected)
+    return [v for v in available if v not in skip]
+
+
+# Folders that hold tools, caches, or other people's code, not the robot code
+SKIP_DIRS = {".git", ".gradle", ".venv", "venv", "env", "node_modules", "build", "bin",
+             "__pycache__", ".idea", ".vscode", "dist", "site-packages", ".tox", "ai-sandbox"}
+
+
+def iter_source_files(root: Path, pattern: str):
+    """Files under root matching pattern (such as "*.java"), skipping SKIP_DIRS."""
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS and not d.startswith(".")]
+        for name in fnmatch.filter(filenames, pattern):
+            yield Path(dirpath) / name
+
+
+def is_robot_project(root: Path) -> bool:
+    """
+    True when root looks like an FRC robot project. Detection only runs
+    there; anywhere else (a docs repo, a home folder) it would guess the
+    language and vendors from unrelated files.
+    """
+    if (root / ".wpilib" / "wpilib_preferences.json").exists() or (root / "vendordeps").is_dir():
+        return True
+    for build_file in ("build.gradle", "build.gradle.kts"):
+        path = root / build_file
+        if path.exists() and "GradleRIO" in path.read_text(errors="ignore"):
+            return True
+    pyproject = root / "pyproject.toml"
+    if pyproject.exists() and "robotpy" in pyproject.read_text(errors="ignore").lower():
+        return True
+    robot_py = root / "robot.py"
+    return robot_py.exists() and "wpilib" in robot_py.read_text(errors="ignore")
 
 
 class ProjectContextDetector:
@@ -158,6 +228,11 @@ class ProjectContextDetector:
 
         context = ProjectContext()
         sources = []
+
+        if not is_robot_project(self.project_root):
+            context.detection_sources = ["not an FRC robot project; no filtering"]
+            self._cached_context = context
+            return context
 
         # Detect language from file extensions
         language, lang_confidence, lang_sources = self._detect_language()
@@ -219,7 +294,7 @@ class ProjectContextDetector:
         # Count source files
         for ext in extensions:
             try:
-                count = len(list(self.project_root.rglob(f"*{ext}")))
+                count = sum(1 for _ in iter_source_files(self.project_root, f"*{ext}"))
                 extensions[ext] += count
                 if count > 0:
                     sources.append(f"{count} {ext} files")
@@ -257,8 +332,13 @@ class ProjectContextDetector:
                     name = data.get("name", "")
                     maven_url = data.get("mavenUrls", [""])[0] if data.get("mavenUrls") else ""
                     uuid = data.get("uuid", "")
+                    groups = " ".join(
+                        f"{dep.get('groupId', '')}.{dep.get('artifactId', '')}"
+                        for dep in data.get("javaDependencies", []) + data.get("cppDependencies", [])
+                        if isinstance(dep, dict)
+                    )
 
-                    content = f"{name} {maven_url} {uuid}".lower()
+                    content = f"{name} {maven_url} {uuid} {groups}".lower()
 
                     for vendor, identifiers in VENDORDEP_IDENTIFIERS.items():
                         for identifier in identifiers:
@@ -305,7 +385,7 @@ class ProjectContextDetector:
 
         try:
             for ext in extensions:
-                for source_file in scan_dir.rglob(ext):
+                for source_file in iter_source_files(scan_dir, ext):
                     if files_scanned >= max_files:
                         break
                     files_scanned += 1

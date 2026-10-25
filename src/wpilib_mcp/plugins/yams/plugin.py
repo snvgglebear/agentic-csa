@@ -2,9 +2,9 @@
 
 import json
 import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
 from typing import Optional
 
 from ..base import (
@@ -17,6 +17,7 @@ from ..base import (
 from ...utils.fetch import HttpFetcher
 from ...utils.html import HtmlCleaner
 from ...utils.search import BM25SearchIndex
+from ...utils.static_docs import clean_llms_markdown, markdown_url
 
 
 logger = logging.getLogger(__name__)
@@ -62,11 +63,12 @@ class Plugin(PluginBase):
 
     @property
     def supported_languages(self) -> list[str]:
-        return ["Java"]
+        return ["Java", "C++"]
 
     @property
     def base_urls(self) -> list[str]:
         return [
+            "https://yams.yassrobotics.com",
             "https://yagsl.gitbook.io/yams",
         ]
 
@@ -154,6 +156,26 @@ class Plugin(PluginBase):
     async def fetch_page(self, url: str) -> Optional[PageContent]:
         if self._fetcher is None:
             return None
+        page_info = self._find_page_by_url(url)
+
+        # GitBook serves a clean Markdown copy of every page at <url>.md
+        try:
+            markdown = clean_llms_markdown(await self._fetcher.fetch(markdown_url(url)))
+            # A missing page comes back as a "Page Not Found" page, not an error
+            if len(markdown) >= 100 and not markdown.startswith("# Page Not Found"):
+                heading = re.search(r"^#\s+(.+)$", markdown, re.M)
+                return PageContent(
+                    url=url,
+                    title=heading.group(1).strip() if heading else "YAMS Documentation",
+                    content=markdown,
+                    vendor=self.display_name,
+                    language=page_info.language if page_info else "Java",
+                    section=page_info.section if page_info else None,
+                    last_fetched=datetime.now().isoformat()
+                )
+        except Exception as e:
+            logger.debug(f"No Markdown copy of {url}: {e}")
+
         page_info = self._find_page_by_url(url)
         try:
             html = await self._fetcher.fetch(url)

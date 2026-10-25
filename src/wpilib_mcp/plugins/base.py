@@ -18,7 +18,9 @@ class SearchResult:
     version: str
     content_preview: str
     score: float = 0.0
-    
+    # True when no indexed page contains most of the query's words
+    weak_match: bool = False
+
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
         return {
@@ -29,7 +31,8 @@ class SearchResult:
             "language": self.language,
             "version": self.version,
             "content_preview": self.content_preview,
-            "score": self.score
+            "score": self.score,
+            "weak_match": self.weak_match,
         }
 
 
@@ -88,7 +91,7 @@ class PluginConfig:
     """Configuration for a plugin."""
     
     enabled: bool = True
-    versions: list[str] = field(default_factory=lambda: ["2025"])
+    versions: list[str] = field(default_factory=lambda: ["latest"])
     languages: list[str] = field(default_factory=lambda: ["Java", "Python", "C++"])
     custom: dict[str, Any] = field(default_factory=dict)
 

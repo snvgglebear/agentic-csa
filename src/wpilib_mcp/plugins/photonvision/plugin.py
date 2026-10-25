@@ -4,7 +4,6 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
 from typing import Optional
 
 from ..base import (
@@ -18,6 +17,7 @@ from ...utils.fetch import HttpFetcher
 from ...utils.html import HtmlCleaner
 from ...utils.markdown import extract_md_title
 from ...utils.search import BM25SearchIndex
+from ...utils.seasons import SeasonVersions
 
 
 logger = logging.getLogger(__name__)
@@ -33,9 +33,10 @@ class IndexPage:
     language: str
     content: str
     content_preview: str
+    version: str = "latest"
 
 
-class Plugin(PluginBase):
+class Plugin(SeasonVersions, PluginBase):
     """
     PhotonVision documentation plugin.
     
@@ -66,7 +67,7 @@ class Plugin(PluginBase):
     
     @property
     def supported_versions(self) -> list[str]:
-        return ["latest", "2025", "2024"]
+        return ["latest"]
     
     @property
     def supported_languages(self) -> list[str]:
@@ -86,8 +87,9 @@ class Plugin(PluginBase):
         # Initialize HTTP fetcher
         self._fetcher = HttpFetcher(cache_ttl_seconds=3600)
         
-        # Load index
-        await self._load_index()
+        # Load one index per configured season
+        for version in config.versions:
+            await self._load_index(version)
         
         # Build BM25 search index
         if self._pages:
@@ -103,9 +105,9 @@ class Plugin(PluginBase):
         self._initialized = True
         logger.info(f"PhotonVision plugin initialized with {len(self._pages)} pages")
     
-    async def _load_index(self) -> None:
-        """Load index file."""
-        index_file = self.data_dir / "index.json"
+    async def _load_index(self, version: str) -> None:
+        """Load the index file for one season (index_<version>.json)."""
+        index_file = self.data_dir / f"index_{version}.json"
         
         if not index_file.exists():
             logger.warning(f"Index file not found: {index_file}")
@@ -115,7 +117,7 @@ class Plugin(PluginBase):
             with open(index_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
             
-            self._index_data = data
+            self._index_data[version] = data
             
             # Parse pages
             for page_data in data.get("pages", []):
@@ -125,7 +127,8 @@ class Plugin(PluginBase):
                     section=page_data.get("section", "General"),
                     language=page_data.get("language", "All"),
                     content=page_data.get("content", ""),
-                    content_preview=page_data.get("content_preview", "")
+                    content_preview=page_data.get("content_preview", ""),
+                    version=version,
                 )
                 self._pages.append(page)
             
@@ -162,8 +165,12 @@ class Plugin(PluginBase):
         if not self._search_index.is_built:
             return []
         
+        version = self._resolve_version(version)
+
         # Define filter function
         def filter_fn(page: IndexPage) -> bool:
+            if version and page.version != version:
+                return False
             if language and page.language not in (language, "All"):
                 return False
             return True
@@ -185,7 +192,7 @@ class Plugin(PluginBase):
                 section=page.section,
                 vendor=self.display_name,
                 language=page.language,
-                version=version or "latest",
+                version=page.version,
                 content_preview=page.content_preview or page.content[:300],
                 score=sr.score
             ))
@@ -197,9 +204,11 @@ class Plugin(PluginBase):
         from urllib.parse import urlparse
         parsed = urlparse(url)
         path = parsed.path
-        marker = "/en/latest/"
-        if marker not in path:
+        import re
+        match = re.search(r"/en/[^/]+/", path)
+        if not match:
             return ""
+        marker = match.group(0)
         prefix, rest = path.split(marker, 1)
         rest = rest.rstrip("/")
         if rest.endswith(".html"):

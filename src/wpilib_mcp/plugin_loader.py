@@ -3,6 +3,7 @@
 import importlib
 import importlib.util
 import json
+import os
 import logging
 from pathlib import Path
 from typing import Any, Optional
@@ -224,24 +225,26 @@ class PluginLoader:
         self._plugins.clear()
 
 
+CONFIG_ENV_VAR = "FIRST_AGENTIC_CSA_CONFIG"
+PACKAGED_CONFIG = Path(__file__).parent / "config.json"
+
+
 def load_config(config_path: Optional[Path] = None) -> dict[str, Any]:
     """
-    Load configuration from config.json.
-    
-    Args:
-        config_path: Path to config file (default: project root config.json)
-        
-    Returns:
-        Configuration dictionary
+    Load configuration.
+
+    Uses, in order: the given path, the file named by the
+    FIRST_AGENTIC_CSA_CONFIG environment variable, then the config.json
+    shipped inside the package (so installed copies get every plugin).
     """
     if config_path is None:
-        # Look for config.json in project root
-        config_path = Path(__file__).parent.parent.parent.parent / "config.json"
-    
+        env_path = os.environ.get(CONFIG_ENV_VAR)
+        config_path = Path(env_path) if env_path else PACKAGED_CONFIG
+
     if not config_path.exists():
         logger.warning(f"Config file not found: {config_path}, using defaults")
         return get_default_config()
-    
+
     try:
         with open(config_path, "r", encoding="utf-8") as f:
             config = json.load(f)
@@ -253,26 +256,24 @@ def load_config(config_path: Optional[Path] = None) -> dict[str, Any]:
 
 
 def get_default_config() -> dict[str, Any]:
-    """Get default configuration."""
-    return {
-        "plugins": {
-            "wpilib": {
-                "enabled": True,
-                "versions": ["2025"],
-                "languages": ["Java", "Python", "C++"]
+    """Get the default configuration: the config.json shipped in the package."""
+    try:
+        with open(PACKAGED_CONFIG, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        logger.error(f"Packaged config unreadable ({e}); loading WPILib only")
+        return {
+            "plugins": {
+                "wpilib": {
+                    "enabled": True,
+                    "versions": ["latest"],
+                    "languages": ["Java", "Python", "C++"]
+                }
+            },
+            "cache": {"ttl_seconds": 3600, "max_size_mb": 100},
+            "search": {
+                "default_max_results": 10,
+                "default_language": "Java",
+                "default_version": "latest"
             }
-        },
-        "cache": {
-            "ttl_seconds": 3600,
-            "max_size_mb": 100
-        },
-        "search": {
-            "default_max_results": 10,
-            "default_language": "Java",
-            "default_version": "2025"
         }
-    }
-
-
-
-

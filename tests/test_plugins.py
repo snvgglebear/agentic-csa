@@ -2,7 +2,6 @@
 
 import pytest
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
 
 from wpilib_mcp.plugins.base import (
     PluginBase,
@@ -144,7 +143,7 @@ class TestPluginConfig:
         config = PluginConfig()
         
         assert config.enabled is True
-        assert "2025" in config.versions
+        assert config.versions == ["latest"]
         assert "Java" in config.languages
         assert config.custom == {}
     

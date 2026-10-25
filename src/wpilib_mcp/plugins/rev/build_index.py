@@ -28,10 +28,12 @@ import httpx
 try:
     from wpilib_mcp.utils.indexer import PageData
     from wpilib_mcp.utils.markdown import extract_md_title, detect_md_language
+    from wpilib_mcp.utils.static_docs import clean_llms_markdown
 except ImportError:
     sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
     from wpilib_mcp.utils.indexer import PageData
     from wpilib_mcp.utils.markdown import extract_md_title, detect_md_language
+    from wpilib_mcp.utils.static_docs import clean_llms_markdown
 
 
 logging.basicConfig(
@@ -51,6 +53,8 @@ def should_crawl(url: str) -> bool:
         return False
 
     allowed_sections = [
+        "/revlib/",
+        "/ion-control/",
         "/brushless/",
         "/through-bore-encoder/",
         "/rev-hardware-client/",
@@ -102,14 +106,21 @@ def parse_llms_txt(text: str) -> list[tuple[str, str]]:
     """
     Parse llms.txt and return (title, absolute_url) pairs for .md links.
 
-    Handles lines like:  - [Page Title](/path/to/page.md)
+    Handles relative and absolute links, with "-" or "*" bullets:
+      - [Page Title](/path/to/page.md)
+      * [Page Title](https://docs.revrobotics.com/path/to/page.md): description
     """
     results = []
+    seen = set()
+    pattern = r"\s*[-*]\s*\[([^\]]+)\]\(((?:https?://docs\.revrobotics\.com)?/[^)\s]+\.md)\)"
     for line in text.splitlines():
-        match = re.match(r"\s*-\s*\[([^\]]+)\]\((/[^\)]+\.md)\)", line)
+        match = re.match(pattern, line)
         if match:
             title, path = match.group(1), match.group(2)
-            results.append((title, BASE_URL + path))
+            url = path if path.startswith("http") else BASE_URL + path
+            if url not in seen:
+                seen.add(url)
+                results.append((title, url))
     return results
 
 
@@ -145,7 +156,7 @@ async def build(version: str = "latest") -> dict:
                 logger.debug(f"Fetching: {md_url}")
                 md_resp = await client.get(md_url)
                 md_resp.raise_for_status()
-                markdown = md_resp.text
+                markdown = clean_llms_markdown(md_resp.text)
             except Exception as e:
                 logger.warning(f"Could not fetch {md_url}: {e}")
                 continue

@@ -24,9 +24,11 @@ from bs4 import BeautifulSoup
 # Handle both module and direct execution
 try:
     from wpilib_mcp.utils.indexer import BaseIndexBuilder
+    from wpilib_mcp.utils.sphinx_inventory import sphinx_doc_urls
 except ImportError:
     sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
     from wpilib_mcp.utils.indexer import BaseIndexBuilder
+    from wpilib_mcp.utils.sphinx_inventory import sphinx_doc_urls
 
 
 logging.basicConfig(
@@ -39,17 +41,23 @@ logger = logging.getLogger(__name__)
 class WPILibIndexBuilder(BaseIndexBuilder):
     """Index builder for WPILib documentation."""
     
-    def __init__(self, version: str = "stable"):
+    def __init__(self, version: str = "latest"):
         super().__init__(
             vendor="wpilib",
             base_url="https://docs.wpilib.org",
-            max_pages=300,
+            max_pages=600,
             max_depth=4,
             rate_limit=0.15
         )
         self.version = version
         self._version_path = f"/en/{version}/docs/"
     
+    async def seed_urls(self) -> list[str]:
+        """Every page in the docs, from the site's Sphinx objects.inv."""
+        return await sphinx_doc_urls(
+            self.client, f"https://docs.wpilib.org/en/{self.version}/"
+        )
+
     @property
     def start_urls(self) -> list[str]:
         base = f"https://docs.wpilib.org/en/{self.version}/docs"
@@ -77,6 +85,7 @@ class WPILibIndexBuilder(BaseIndexBuilder):
         
         # Exclude non-content pages
         exclude_patterns = [
+            r"\?",
             r"_sources/",
             r"genindex",
             r"search\.html",
@@ -173,8 +182,8 @@ async def main():
     )
     parser.add_argument(
         "--version",
-        default="stable",
-        help="WPILib version to index (default: stable)"
+        default="latest",
+        help="WPILib docs version to index: latest (2027, the default) or stable"
     )
     parser.add_argument(
         "--output",

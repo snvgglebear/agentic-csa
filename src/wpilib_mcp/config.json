@@ -1,0 +1,100 @@
+{
+  "plugins": {
+    "wpilib": {
+      "enabled": true,
+      "versions": [
+        "latest"
+      ],
+      "languages": [
+        "Java",
+        "Python",
+        "C++"
+      ]
+    },
+    "rev": {
+      "enabled": true,
+      "languages": [
+        "Java",
+        "C++",
+        "Python"
+      ]
+    },
+    "ctre": {
+      "enabled": true,
+      "languages": [
+        "Java",
+        "C++",
+        "Python"
+      ]
+    },
+    "redux": {
+      "enabled": false,
+      "languages": [
+        "Java"
+      ]
+    },
+    "photonvision": {
+      "enabled": true,
+      "languages": [
+        "Java",
+        "C++",
+        "Python"
+      ],
+      "versions": [
+        "latest"
+      ]
+    },
+    "yagsl": {
+      "enabled": true,
+      "languages": [
+        "Java"
+      ]
+    },
+    "yams": {
+      "enabled": true,
+      "languages": [
+        "Java",
+        "C++"
+      ]
+    },
+    "advantagekit": {
+      "enabled": true,
+      "languages": [
+        "Java"
+      ]
+    },
+    "pathplanner": {
+      "enabled": true,
+      "languages": [
+        "Java",
+        "C++",
+        "Python"
+      ]
+    },
+    "limelight": {
+      "enabled": true,
+      "languages": [
+        "Java",
+        "C++",
+        "Python"
+      ]
+    },
+    "advantagescope": {
+      "enabled": true,
+      "languages": [
+        "Java",
+        "C++",
+        "Python"
+      ]
+    }
+  },
+  "cache": {
+    "ttl_seconds": 3600,
+    "max_size_mb": 200
+  },
+  "search": {
+    "default_max_results": 10,
+    "default_language": "Java",
+    "default_version": "latest"
+  }
+}

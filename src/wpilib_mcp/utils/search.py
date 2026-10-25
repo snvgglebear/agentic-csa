@@ -2,9 +2,11 @@
 
 import re
 from dataclasses import dataclass, field
-from difflib import SequenceMatcher, get_close_matches
+from difflib import get_close_matches
+from functools import lru_cache
 from typing import Generic, TypeVar
 
+import snowballstemmer
 from rank_bm25 import BM25Okapi
 
 
@@ -25,8 +27,56 @@ FRC_PRESERVED_TERMS = {
     "frc", "wpi", "rev", "ctre", "rio",
 }
 
-# FRC synonym dictionary for query expansion
+_STEMMER = snowballstemmer.stemmer("english")
+
+# How much a synonym counts compared with a word the user typed
+SYNONYM_WEIGHT = 0.4
+
+
+# FRC nouns whose usual stem is a common word: "follower" would match
+# "the following" on nearly every page, "controller" any "control".
+STEM_EXCEPTIONS = {
+    "follower": "follower", "followers": "follower",
+    "controller": "controller", "controllers": "controller",
+    "limiter": "limiter", "limiters": "limiter",
+}
+
+
+@lru_cache(maxsize=200_000)
+def stem(token: str) -> str:
+    """Reduce a word to its stem, so "logs" matches "log" and "homing" matches "home"."""
+    if token in STEM_EXCEPTIONS:
+        return STEM_EXCEPTIONS[token]
+    if token in FRC_PRESERVED_TERMS or len(token) <= 3 or not token.isalpha():
+        return token
+    return _STEMMER.stemWord(token)
+
+
+# FRC synonym dictionary for query expansion. Keys and values are matched
+# after stemming, so "logs" also matches the "log" entry.
+# Student phrasings and the words the docs use for the same thing. These
+# count as much as the typed words, unlike FRC_SYNONYMS below.
+FRC_REWRITES = {
+    "brown out": ["brownout"],
+    "browns out": ["brownout"],
+    "browning out": ["brownout"],
+    "same time": ["parallel", "composition"],
+    "at once": ["parallel", "composition"],
+    "homing": ["home"],
+    "characterize": ["sysid", "system identification"],
+    "match logs": ["datalog", "log files"],
+}
+
 FRC_SYNONYMS = {
+    # How students describe problems
+    "logs": ["datalog", "log files"],
+    "zero": ["home", "reset encoder"],
+    "hard stop": ["home", "limit switch"],
+    "sysid": ["system identification", "characterization"],
+    "auto chooser": ["autonomous", "chooser"],
+    "autonomous routine": ["auto", "autos"],
+    "while loop": ["blocking", "scheduler"],
+
     # Motor controllers
     "motor controller": ["sparkmax", "spark max", "talonfx", "talon fx", "spark flex", "sparkflex", "talon fxs", "kraken"],
     "sparkmax": ["spark max", "motor controller", "rev motor controller"],
@@ -128,6 +178,9 @@ class BM25SearchIndex(Generic[T]):
         "this", "that", "these", "those", "it", "its", "you", "your", "we",
         "our", "they", "their", "he", "she", "him", "her", "his", "hers",
         "how", "what", "when", "where", "why", "which", "who",
+        # Filler in how students ask ("why does my robot...", "using a...")
+        "my", "me", "i", "us", "using", "use", "just", "about", "into",
+        "so", "if", "then", "there", "here", "also", "some", "any",
     }
     # NOTE: "can" removed - it's a critical FRC term (CAN bus)
     
@@ -186,7 +239,7 @@ class BM25SearchIndex(Generic[T]):
         else:
             tokens = [t for t in tokens if len(t) > 1]
 
-        return tokens
+        return [stem(t) for t in tokens]
 
     def _fuzzy_match_token(self, token: str, threshold: float = 0.8) -> list[str]:
         """
@@ -199,11 +252,51 @@ class BM25SearchIndex(Generic[T]):
         Returns:
             List of similar tokens from the corpus
         """
-        if not self._all_tokens or len(token) < 3:
+        # Only for words the docs don't contain (likely typos). Fuzzy matches
+        # for real words add look-alikes that pull in unrelated pages.
+        if not self._all_tokens or len(token) < 3 or token in self._all_tokens:
             return []
 
         matches = get_close_matches(token, self._all_tokens, n=3, cutoff=threshold)
         return [m for m in matches if m != token]
+
+    def term_coverage(self, query: str, text: str) -> float:
+        """
+        Share of the query's words found in text (0.0 to 1.0), weighted by
+        how rare each word is. A student
+        phrasing from FRC_REWRITES counts as found when text holds the
+        docs' word for it, so "browns out" is covered by "brownout".
+        """
+        query_tokens = self.tokenize(query)
+        if not query_tokens or self._bm25 is None:
+            return 1.0
+        text_tokens = set(self.tokenize(text))
+        covered = {tok for tok in query_tokens if tok in text_tokens}
+        query_text = f" {' '.join(query_tokens)} "
+        for phrase, replacements in FRC_REWRITES.items():
+            phrase_tokens = self.tokenize(phrase)
+            if not phrase_tokens or f" {' '.join(phrase_tokens)} " not in query_text:
+                continue
+            if any(set(self.tokenize(r)) <= text_tokens for r in replacements):
+                covered.update(phrase_tokens)
+        # Weight each word by its rarity in the docs (BM25's IDF): missing a
+        # rare, specific word ("sensorless") matters more than a common one
+        # ("drivetrain"). Words the docs never use get the highest weight.
+        idf = self._bm25.idf
+        top = max(idf.values()) if idf else 1.0
+        weight = {tok: max(idf.get(tok, top), 0.1) for tok in set(query_tokens)}
+        return sum(weight[tok] for tok in covered if tok in weight) / sum(weight.values())
+
+    def _phrase_expansions(self, tokens: list[str], table: dict[str, list[str]]) -> list[str]:
+        """Stemmed words from every entry in table whose phrase appears in tokens."""
+        query_text = f" {' '.join(tokens)} "
+        words = []
+        for phrase, replacements in table.items():
+            phrase_tokens = self.tokenize(phrase)
+            if phrase_tokens and f" {' '.join(phrase_tokens)} " in query_text:
+                for replacement in replacements:
+                    words.extend(w for w in self.tokenize(replacement) if w not in words)
+        return words
 
     def _expand_query(self, tokens: list[str]) -> tuple[list[str], list[str]]:
         """
@@ -218,27 +311,19 @@ class BM25SearchIndex(Generic[T]):
         expanded = list(tokens)
         sources = []
 
-        # Check for multi-word matches first
-        query_text = " ".join(tokens)
+        # Match synonym phrases on stemmed words, padded so "log" doesn't
+        # match inside "datalog"
+        query_text = f" {' '.join(tokens)} "
         for phrase, synonyms in FRC_SYNONYMS.items():
-            if phrase in query_text:
-                for syn in synonyms[:2]:  # Limit expansions
-                    syn_tokens = syn.lower().split()
-                    for st in syn_tokens:
-                        if st not in expanded and st not in self.STOP_WORDS:
-                            expanded.append(st)
+            phrase_tokens = self.tokenize(phrase)
+            if not phrase_tokens or f" {' '.join(phrase_tokens)} " not in query_text:
+                continue
+            for syn in synonyms[:2]:  # Limit expansions
+                for st in self.tokenize(syn):
+                    if st not in expanded:
+                        expanded.append(st)
+                        if f"{phrase} → {syn}" not in sources:
                             sources.append(f"{phrase} → {syn}")
-
-        # Check individual tokens
-        for token in tokens:
-            if token in FRC_SYNONYMS:
-                for syn in FRC_SYNONYMS[token][:2]:
-                    syn_tokens = syn.lower().split()
-                    for st in syn_tokens:
-                        if st not in expanded and st not in self.STOP_WORDS:
-                            expanded.append(st)
-                            if f"{token} → {syn}" not in sources:
-                                sources.append(f"{token} → {syn}")
 
         return expanded, sources
 
@@ -407,9 +492,13 @@ class BM25SearchIndex(Generic[T]):
         filter_fn: callable,
         max_results: int = 10,
         expand_query: bool = True,
+        light_terms: frozenset[str] = frozenset(),
     ) -> list[ScoredResult[T]]:
         """
         Search with an additional filter function.
+
+        light_terms are stemmed words that count at SYNONYM_WEIGHT, such as
+        product names the caller already boosts another way.
 
         Args:
             query: Search query string
@@ -427,20 +516,30 @@ class BM25SearchIndex(Generic[T]):
         if not query_tokens:
             return []
 
-        # Expand query with synonyms
-        search_tokens = query_tokens
-        if expand_query:
-            search_tokens, _ = self._expand_query(query_tokens)
-
-        # Add fuzzy matches
+        # Words the user typed, plus fuzzy matches for likely typos
+        typed = list(query_tokens)
         if self.enable_fuzzy:
             for token in query_tokens:
-                fuzzy_matches = self._fuzzy_match_token(token)
-                for match in fuzzy_matches[:1]:
-                    if match not in search_tokens:
-                        search_tokens.append(match)
+                for match in self._fuzzy_match_token(token)[:1]:
+                    if match not in typed:
+                        typed.append(match)
 
-        scores = self._bm25.get_scores(search_tokens)
+        # Rewrites (student phrasing -> docs wording) count fully; synonyms
+        # help recall but count less than the user's own words
+        if expand_query:
+            # Added even when typed: the docs' wording for the phrase deserves
+            # full weight ("match logs" -> "log files" favors the Log Files page)
+            typed.extend(self._phrase_expansions(query_tokens, FRC_REWRITES))
+        heavy = [tok for tok in typed if tok not in light_terms]
+        light = [tok for tok in typed if tok in light_terms]
+        scores = self._bm25.get_scores(heavy) if heavy else self._bm25.get_scores(light)
+        if heavy and light:
+            scores = scores + SYNONYM_WEIGHT * self._bm25.get_scores(light)
+        if expand_query:
+            expanded, _ = self._expand_query(query_tokens)
+            extra = [tok for tok in expanded if tok not in typed]
+            if extra:
+                scores = scores + SYNONYM_WEIGHT * self._bm25.get_scores(extra)
 
         # Calculate max for confidence
         max_score = max(scores) if len(scores) > 0 and max(scores) > 0 else 1.0

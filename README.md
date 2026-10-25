@@ -10,7 +10,7 @@ Have you ever spent hours looking for how to configure a SparkMax motor controll
 
 ## Features
 
-- **One Search for Everything**: Search WPILib, REV, CTRE, Redux, and PhotonVision docs all at once
+- **One Search for Everything**: Search WPILib, REV, CTRE, PhotonVision, Limelight, PathPlanner, AdvantageKit, AdvantageScope, YAGSL, YAMS, and Redux docs all at once
 - **Ask in Plain English**: Type questions like "How do I configure a SparkMax?" instead of searching through menus
 - **Filter by Language**: Get results for Java, Python, or C++ (whichever you're using)
 - **Works with Any Year**: Search 2024 docs, 2025 docs, or whatever version you need
@@ -57,18 +57,27 @@ The tool will search through all the FRC documentation and give you the most rel
 
 This tool searches through documentation from:
 
-- **WPILib** - The main FRC programming library (docs.wpilib.org)
-- **REV Robotics** - SparkMax and other REV products (docs.revrobotics.com)
+- **WPILib** - The main FRC programming library (docs.wpilib.org), 2027 season docs
+- **REV Robotics** - REVLib, SPARK MAX, SPARK Flex, and other REV products (docs.revrobotics.com)
 - **CTRE Phoenix** - TalonFX and other CTRE products (v6.docs.ctr-electronics.com)
-- **Redux Robotics** - Redux products (docs.reduxrobotics.com)
-- **PhotonVision** - Computer vision library (docs.photonvision.org)
+- **PhotonVision** - Computer vision library (docs.photonvision.org), 2027 season docs
+- **Limelight** - Limelight cameras and MegaTag localization (docs.limelightvision.io)
+- **PathPlanner** - PathPlanner GUI and PathPlannerLib (pathplanner.dev)
+- **AdvantageKit** - Logging and replay framework (docs.advantagekit.org)
+- **AdvantageScope** - Log and live-data viewer (docs.advantagescope.org)
+- **YAGSL** and **YAMS** - Swerve and mechanism libraries (yagsl.yassrobotics.com, yams.yassrobotics.com)
+- **Redux Robotics** - Redux products (docs.reduxrobotics.com; off by default)
+
+Forum posts (Chief Delphi) and team code on GitHub aren't indexed. Use your AI assistant's web search for those.
 
 You can search all of them at once, or pick specific ones to search.
+
+When the server runs inside a robot project, it skips libraries the project doesn't use (a CTRE team doesn't get REV pages unless it asks about a REV product by name). It reads your `vendordeps` folder and imports to decide. Tools that don't show up in a project, like AdvantageScope and Limelight, are always searched. Outside a robot project, nothing is skipped.
 
 
 ## Customization (Optional)
 
-If you want to change settings, you can edit the `config.json` file. This is totally optional - the default settings work great for most teams.
+If you want to change settings, copy `src/wpilib_mcp/config.json`, edit the copy, and set the `FIRST_AGENTIC_CSA_CONFIG` environment variable to its path. This is totally optional - the default settings work great for most teams.
 
 You can:
 - Turn off certain documentation sources if you don't use them

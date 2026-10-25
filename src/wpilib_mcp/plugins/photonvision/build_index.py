@@ -2,9 +2,12 @@
 """
 Build documentation index for PhotonVision.
 
-Discovers pages by crawling HTML, then fetches each page's
-_sources/*.md.txt Sphinx source file for clean MyST Markdown content.
-Falls back to HTML extraction if the source file is unavailable.
+Lists every page from the site's Sphinx objects.inv, then fetches each
+page's _sources/*.md.txt source for clean MyST Markdown content, falling
+back to HTML extraction if the source file is unavailable.
+
+--version latest (the default) indexes the development docs, which cover the
+2027 season; --version stable indexes the newest full release instead.
 
 Usage:
     python -m wpilib_mcp.plugins.photonvision.build_index
@@ -22,7 +25,7 @@ import sys
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urlparse
 
 import httpx
 from bs4 import BeautifulSoup
@@ -31,10 +34,12 @@ from bs4 import BeautifulSoup
 try:
     from wpilib_mcp.utils.indexer import PageData
     from wpilib_mcp.utils.markdown import extract_md_title, detect_md_language
+    from wpilib_mcp.utils.sphinx_inventory import sphinx_doc_urls
 except ImportError:
     sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
     from wpilib_mcp.utils.indexer import PageData
     from wpilib_mcp.utils.markdown import extract_md_title, detect_md_language
+    from wpilib_mcp.utils.sphinx_inventory import sphinx_doc_urls
 
 
 logging.basicConfig(
@@ -44,26 +49,29 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://docs.photonvision.org"
-MAX_PAGES = 300
-MAX_DEPTH = 5
 RATE_LIMIT = 0.2
+SITEMAP_URL = f"{BASE_URL}/sitemap.xml"
+RELEASE = re.compile(r"/en/(v(\d{4})\.(\d+)\.(\d+))/$")
 
-START_URLS = [
-    "https://docs.photonvision.org/en/latest/",
-    "https://docs.photonvision.org/en/latest/docs/quick-start/index.html",
-    "https://docs.photonvision.org/en/latest/docs/hardware/index.html",
-    "https://docs.photonvision.org/en/latest/docs/installation/index.html",
-    "https://docs.photonvision.org/en/latest/docs/pipelines/index.html",
-    "https://docs.photonvision.org/en/latest/docs/apriltag-pipelines/index.html",
-    "https://docs.photonvision.org/en/latest/docs/reflectiveAndShape/index.html",
-    "https://docs.photonvision.org/en/latest/docs/objectDetection/index.html",
-    "https://docs.photonvision.org/en/latest/docs/programming/photonlib/index.html",
-    "https://docs.photonvision.org/en/latest/docs/simulation/index.html",
-    "https://docs.photonvision.org/en/latest/docs/integration/index.html",
-    "https://docs.photonvision.org/en/latest/docs/examples/index.html",
-    "https://docs.photonvision.org/en/latest/docs/troubleshooting/index.html",
-    "https://docs.photonvision.org/en/latest/docs/additional-resources/index.html",
-]
+
+async def resolve_docs_path(client: httpx.AsyncClient, version: str) -> str:
+    """
+    The docs folder for a season: "latest" stays "latest" (next season's
+    development docs); "stable" becomes the newest full release, such as
+    "vYYYY.N.N". PhotonVision publishes no /en/stable/.
+    """
+    if version != "stable":
+        return version
+    resp = await client.get(SITEMAP_URL)
+    resp.raise_for_status()
+    releases = []
+    for loc in re.findall(r"<loc>([^<]+)</loc>", resp.text):
+        match = RELEASE.search(loc.strip())
+        if match:
+            releases.append((tuple(int(x) for x in match.groups()[1:]), match.group(1)))
+    if not releases:
+        raise RuntimeError("No PhotonVision releases found in the sitemap")
+    return max(releases)[1]
 
 
 def to_sources_url(url: str) -> str:
@@ -75,32 +83,25 @@ def to_sources_url(url: str) -> str:
       -> .../en/latest/_sources/docs/programming/photonlib/index.md.txt
     """
     parsed = urlparse(url)
-    path = parsed.path
-
-    marker = "/en/latest/"
-    if marker not in path:
+    match = re.search(r"/en/[^/]+/", parsed.path)
+    if not match:
         return ""
-
-    prefix, rest = path.split(marker, 1)
+    marker = match.group(0)
+    prefix, rest = parsed.path.split(marker, 1)
     rest = rest.rstrip("/")
     if rest.endswith(".html"):
         rest = rest[:-5]
     elif not rest:
         rest = "index"
-
-    sources_path = f"{prefix}{marker}_sources/{rest}.md.txt"
-    return parsed._replace(path=sources_path).geturl()
+    return parsed._replace(path=f"{prefix}{marker}_sources/{rest}.md.txt").geturl()
 
 
-def should_crawl(url: str) -> bool:
-    """Only crawl PhotonVision docs pages."""
-    if "docs.photonvision.org" not in url:
-        return False
-    if "/en/latest/" not in url:
-        return False
-    exclude = [r"\?", r"/_", r"/genindex", r"/search\.html",
-               r"/py-modindex", r"\.zip$", r"\.pdf$",
-               r"\.png$", r"\.jpg$", r"\.svg$"]
+def should_index(url: str) -> bool:
+    """Skip pages students don't need: the 404 page and developer docs."""
+    exclude = [
+        r"/404\.html$", r"/contributing/", r"/genindex", r"/search\.html",
+        r"/en/[^/]+/index\.html$",  # the home page is only a table of contents
+    ]
     return not any(re.search(p, url) for p in exclude)
 
 
@@ -142,19 +143,6 @@ def extract_section(url: str) -> str:
     return "General"
 
 
-def extract_links(soup: BeautifulSoup, page_url: str) -> list[str]:
-    """Extract in-domain links from an HTML page."""
-    links = []
-    for a in soup.find_all("a", href=True):
-        href = a["href"]
-        if href.startswith(("#", "mailto:", "javascript:")):
-            continue
-        full = urljoin(page_url, href).split("#")[0]
-        if urlparse(full).netloc == urlparse(BASE_URL).netloc:
-            links.append(full)
-    return list(set(links))
-
-
 def create_preview(content: str, max_length: int = 300) -> str:
     if len(content) <= max_length:
         return content
@@ -194,41 +182,19 @@ def extract_html_content(soup: BeautifulSoup) -> str:
 
 
 async def build(version: str = "latest") -> dict:
-    """Crawl HTML for link discovery, then fetch _sources/*.md.txt for content."""
+    """List pages from objects.inv, then fetch each page's _sources/*.md.txt."""
     pages: list[PageData] = []
-    visited: set[str] = set()
-    discovered: list[str] = []
 
     async with httpx.AsyncClient(
         timeout=30.0,
         follow_redirects=True,
         headers={"User-Agent": "WPILib-MCP-photonvision-Indexer/1.0"}
     ) as client:
-
-        # --- Phase 1: discover all page URLs via HTML crawl ---
-        async def crawl_links(url: str, depth: int) -> None:
-            if depth > MAX_DEPTH or url in visited or len(discovered) >= MAX_PAGES:
-                return
-            if not should_crawl(url):
-                return
-            visited.add(url)
-            try:
-                resp = await client.get(url)
-                resp.raise_for_status()
-                soup = BeautifulSoup(resp.text, "lxml")
-                discovered.append(url)
-                for link in extract_links(soup, url):
-                    await crawl_links(link, depth + 1)
-                    await asyncio.sleep(RATE_LIMIT)
-            except Exception as e:
-                logger.warning(f"Link discovery error {url}: {e}")
-
-        for start in START_URLS:
-            await crawl_links(start, depth=0)
-            if len(discovered) >= MAX_PAGES:
-                break
-
-        logger.info(f"Discovered {len(discovered)} pages")
+        docs_path = await resolve_docs_path(client, version)
+        root = f"{BASE_URL}/en/{docs_path}/"
+        logger.info(f"Indexing PhotonVision {version} from {root}")
+        discovered = [u for u in await sphinx_doc_urls(client, root) if should_index(u)]
+        logger.info(f"Found {len(discovered)} pages")
 
         # --- Phase 2: fetch _sources/*.md.txt for each page ---
         for html_url in discovered:
@@ -258,8 +224,9 @@ async def build(version: str = "latest") -> dict:
                     content = extract_html_content(soup)
                     h1 = soup.find("h1")
                     title = (
-                        (soup.title.string.strip() if soup.title else None) or
-                        (h1.get_text(strip=True) if h1 else None) or
+                        (h1.get_text(strip=True).rstrip("#¶") if h1 else None) or
+                        (re.sub(r"\s+-\s+PhotonVision Docs$", "", soup.title.string.strip())
+                         if soup.title and soup.title.string else None) or
                         html_url.split("/")[-1]
                     )
                     language = "All"
@@ -285,6 +252,7 @@ async def build(version: str = "latest") -> dict:
     return {
         "vendor": "photonvision",
         "version": version,
+        "docs_path": docs_path,
         "built_at": datetime.now().isoformat(),
         "pages": [asdict(p) for p in pages],
     }
@@ -294,8 +262,10 @@ async def main():
     parser = argparse.ArgumentParser(
         description="Build PhotonVision documentation index"
     )
+    parser.add_argument("--version", default="latest", choices=["latest", "stable"],
+                        help="latest = development docs (2027, the default), stable = newest full release")
     parser.add_argument("--output", type=Path,
-                        help="Output file path (default: data/index.json)")
+                        help="Output file path (default: data/index_<version>.json)")
     parser.add_argument("--verbose", "-v", action="store_true",
                         help="Enable verbose logging")
     args = parser.parse_args()
@@ -304,9 +274,9 @@ async def main():
         logging.getLogger().setLevel(logging.DEBUG)
 
     data_dir = Path(__file__).parent / "data"
-    output_path = args.output or (data_dir / "index.json")
+    output_path = args.output or (data_dir / f"index_{args.version}.json")
 
-    index = await build("latest")
+    index = await build(args.version)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:

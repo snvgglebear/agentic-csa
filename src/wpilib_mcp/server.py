@@ -22,11 +22,14 @@ from mcp.types import Tool, TextContent
 from .plugin_loader import PluginLoader, load_config
 from .tool_router import (
     ToolRouter,
+    clean_title,
+    vendors_named_in,
     format_search_results,
     format_page_content,
     format_sections
 )
-from .utils.context import get_project_context, ProjectContext
+from .utils.context import get_project_context, vendors_for_project
+from .utils.static_docs import clean_page_text
 
 
 # Configure logging
@@ -36,6 +39,11 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stderr)]
 )
 logger = logging.getLogger(__name__)
+
+
+# Page text longer than this is cut off unless the caller asks for more
+# (about 3,000 tokens).
+DEFAULT_FETCH_CHARS = 12000
 
 
 # Global state
@@ -75,8 +83,8 @@ def create_server() -> Server:
                         },
                         "version": {
                             "type": "string",
-                            "default": "2025",
-                            "description": "Documentation version (e.g., '2025', '2024')"
+                            "default": "latest",
+                            "description": "WPILib and PhotonVision docs version: 'latest' (2027 season). '2027' also works."
                         },
                         "language": {
                             "type": "string",
@@ -129,6 +137,13 @@ def create_server() -> Server:
                         "url": {
                             "type": "string",
                             "description": "Full URL of the documentation page to fetch"
+                        },
+                        "max_chars": {
+                            "type": "integer",
+                            "minimum": 1000,
+                            "maximum": 100000,
+                            "default": DEFAULT_FETCH_CHARS,
+                            "description": "Longest page text to return (about 4 characters per token). Longer pages are cut off with a note."
                         }
                     },
                     "required": ["url"]
@@ -151,8 +166,8 @@ def create_server() -> Server:
                         },
                         "version": {
                             "type": "string",
-                            "default": "2025",
-                            "description": "Documentation version"
+                            "default": "latest",
+                            "description": "WPILib docs version: 'latest' (2027 season)"
                         },
                         "language": {
                             "type": "string",
@@ -216,7 +231,19 @@ async def handle_search(arguments: dict) -> list[TextContent]:
 
     # Start with provided or default values
     vendors = arguments.get("vendors", ["all"])
-    version = arguments.get("version", search_config.get("default_version", "2025"))
+
+    # Say which vendors exist instead of silently finding nothing
+    if isinstance(vendors, str):
+        vendors = [vendors]
+    unknown = [v for v in vendors if v != "all" and v not in _router.available_vendors]
+    if unknown and len(unknown) == len(vendors):
+        return [TextContent(
+            type="text",
+            text=f"Error: unknown vendor(s) {', '.join(unknown)}. "
+                 f"Available vendors: {', '.join(_router.available_vendors)}"
+        )]
+
+    version = arguments.get("version", search_config.get("default_version", "latest"))
     language = arguments.get("language")  # None if not provided
     max_results = arguments.get("max_results", search_config.get("default_max_results", 10))
 
@@ -231,10 +258,12 @@ async def handle_search(arguments: dict) -> list[TextContent]:
                     language = context.language
                     context_info += f"[Auto-detected language: {language}] "
 
-                # Use detected vendors if vendors is "all"
+                # Skip libraries the project doesn't use, but keep tools that
+                # leave no trace in a project and any vendor the query names
                 if (vendors == ["all"] or "all" in vendors) and context.vendors:
-                    # Always include wpilib plus detected vendors
-                    vendors = list(set(["wpilib"] + context.vendors))
+                    vendors = vendors_for_project(context.vendors, _router.available_vendors)
+                    vendors += [v for v in vendors_named_in(query)
+                                if v in _router.available_vendors and v not in vendors]
                     context_info += f"[Auto-detected vendors: {', '.join(context.vendors)}] "
 
                 logger.info(f"Context detection: {context.to_dict()}")
@@ -246,7 +275,11 @@ async def handle_search(arguments: dict) -> list[TextContent]:
         language = search_config.get("default_language", "Java")
 
     # Clamp max_results
-    max_results = max(1, min(25, max_results))
+    # Some clients send numbers as strings ("3")
+    try:
+        max_results = max(1, min(25, int(max_results)))
+    except (TypeError, ValueError):
+        max_results = search_config.get("default_max_results", 10)
 
     logger.info(
         f"Search: query={query!r}, vendors={vendors}, "
@@ -343,6 +376,24 @@ async def handle_fetch(arguments: dict) -> list[TextContent]:
                      f"Available vendors: {vendors}"
             )]
     
+    page.title = clean_title(page.title)
+    page.content = clean_page_text(page.content)
+
+    max_chars = arguments.get("max_chars", DEFAULT_FETCH_CHARS)
+    try:
+        max_chars = max(1000, min(100000, int(max_chars)))
+    except (TypeError, ValueError):
+        max_chars = DEFAULT_FETCH_CHARS
+
+    if len(page.content) > max_chars:
+        cut = page.content.rfind("\n", 0, max_chars)
+        cut = cut if cut > max_chars // 2 else max_chars
+        page.content = (
+            page.content[:cut].rstrip()
+            + f"\n\n[Cut off at {cut:,} of {len(page.content):,} characters. "
+            f"Fetch again with a larger max_chars for the rest.]"
+        )
+
     formatted = format_page_content(page)
     return [TextContent(type="text", text=formatted)]
 
@@ -354,7 +405,7 @@ async def handle_list_sections(arguments: dict) -> list[TextContent]:
     search_config = _config.get("search", {})
     
     vendors = arguments.get("vendors", ["all"])
-    version = arguments.get("version", search_config.get("default_version", "2025"))
+    version = arguments.get("version", search_config.get("default_version", "latest"))
     language = arguments.get("language", search_config.get("default_language", "Java"))
     
     logger.info(f"List sections: vendors={vendors}, version={version}, language={language}")
@@ -386,8 +437,10 @@ async def initialize_server(config_path: Optional[Path] = None) -> None:
     else:
         logger.info(f"Loaded {len(plugins)} plugin(s): {list(plugins.keys())}")
     
-    # Create router
+    # Create router, and build the cross-vendor search index now so the
+    # first search doesn't wait for it
     _router = ToolRouter(plugins)
+    _router._get_global_index()
     
     # Log plugin info
     for info in _router.get_plugin_info():

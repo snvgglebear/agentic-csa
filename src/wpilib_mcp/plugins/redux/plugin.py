@@ -4,7 +4,6 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
 from typing import Optional
 
 from ..base import (
@@ -65,7 +64,7 @@ class Plugin(PluginBase):
     
     @property
     def supported_versions(self) -> list[str]:
-        return ["2025", "2024"]
+        return ["latest"]
     
     @property
     def supported_languages(self) -> list[str]:

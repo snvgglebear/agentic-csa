@@ -6,7 +6,7 @@ This is a convenience wrapper that calls individual plugin build scripts.
 Each vendor maintains their own build_index.py in their plugin directory.
 
 Usage:
-    python scripts/build_index.py wpilib --version 2025
+    python scripts/build_index.py wpilib
     python scripts/build_index.py rev
     python scripts/build_index.py ctre
     python scripts/build_index.py redux
@@ -17,7 +17,6 @@ For vendor-specific options, run the plugin's build script directly:
 """
 
 import argparse
-import asyncio
 import subprocess
 import sys
 from pathlib import Path
@@ -64,8 +63,9 @@ def main():
     )
     parser.add_argument(
         "--version",
-        default="stable",
-        help="Documentation version (passed to plugin build script)"
+        default=None,
+        help="Docs version for plugins that have several (wpilib, photonvision, ctre). "
+             "Default: each plugin's own default (latest for wpilib and photonvision)"
     )
     parser.add_argument(
         "--verbose", "-v",
@@ -76,7 +76,7 @@ def main():
     args, extra_args = parser.parse_known_args()
     
     # Build extra args to pass to plugin scripts
-    if args.version != "stable":
+    if args.version:
         extra_args.extend(["--version", args.version])
     if args.verbose:
         extra_args.append("--verbose")

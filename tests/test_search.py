@@ -1,8 +1,7 @@
 """Tests for BM25 search functionality."""
 
-import pytest
 
-from wpilib_mcp.utils.search import BM25SearchIndex, ScoredResult, merge_search_results
+from wpilib_mcp.utils.search import BM25SearchIndex, ScoredResult, merge_search_results, stem
 
 
 class TestBM25SearchIndex:
@@ -69,11 +68,11 @@ class TestBM25SearchIndex:
         """Test tokenization handles different formats."""
         index = BM25SearchIndex()
         
-        # Test camelCase
+        # Test camelCase (words are stored stemmed: "position" -> "posit")
         tokens = index.tokenize("getMotorPosition")
         assert "get" in tokens
         assert "motor" in tokens
-        assert "position" in tokens
+        assert stem("position") in tokens
         
         # Test snake_case
         tokens = index.tokenize("get_motor_position")

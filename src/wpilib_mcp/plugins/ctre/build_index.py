@@ -24,9 +24,11 @@ from bs4 import BeautifulSoup
 # Handle both module and direct execution
 try:
     from wpilib_mcp.utils.indexer import BaseIndexBuilder
+    from wpilib_mcp.utils.sphinx_inventory import sphinx_doc_urls
 except ImportError:
     sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
     from wpilib_mcp.utils.indexer import BaseIndexBuilder
+    from wpilib_mcp.utils.sphinx_inventory import sphinx_doc_urls
 
 
 logging.basicConfig(
@@ -49,6 +51,12 @@ class CTREIndexBuilder(BaseIndexBuilder):
         )
         self.doc_version = version
     
+    async def seed_urls(self) -> list[str]:
+        """Every page in the docs, from the site's Sphinx objects.inv."""
+        return await sphinx_doc_urls(
+            self.client, f"https://v6.docs.ctr-electronics.com/en/{self.doc_version}/"
+        )
+
     @property
     def start_urls(self) -> list[str]:
         base = f"https://v6.docs.ctr-electronics.com/en/{self.doc_version}/docs"
@@ -72,6 +80,8 @@ class CTREIndexBuilder(BaseIndexBuilder):
         
         # Exclude non-content pages
         exclude_patterns = [
+            r"\?",
+            r"/404\.html",
             r"_sources/",
             r"genindex",
             r"search\.html",

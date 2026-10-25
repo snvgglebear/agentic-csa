@@ -112,6 +112,14 @@ class BaseIndexBuilder(ABC):
         """
         pass
     
+    async def seed_urls(self) -> list[str]:
+        """
+        Full list of pages to index, when the site publishes one (for example
+        a Sphinx objects.inv). Override it to skip link crawling, which can
+        miss pages. Return [] to crawl from start_urls instead.
+        """
+        return []
+
     def extract_title(self, soup: BeautifulSoup, url: str) -> Optional[str]:
         """
         Extract page title. Override for custom logic.
@@ -123,16 +131,21 @@ class BaseIndexBuilder(ABC):
         Returns:
             Page title or None
         """
-        if soup.title and soup.title.string:
-            title = soup.title.string.strip()
-            # Clean common suffixes
-            title = re.sub(r"\s*[—\-|·].*$", "", title).strip()
-            return title
-        
+        # The page heading is the cleanest title. Drop permalink marks ("¶").
         h1 = soup.find("h1")
         if h1:
-            return h1.get_text(strip=True)
-        
+            for anchor in h1.select("a.headerlink"):
+                anchor.decompose()
+            heading = re.sub(r"\s+", " ", h1.get_text()).strip().rstrip("¶\uf0c1").strip()
+            if heading:
+                return heading
+
+        if soup.title and soup.title.string:
+            # Drop only the last " — Site Name" segment, keeping titles like
+            # "Shuffleboard - Advanced Usage" and hyphenated words.
+            title = soup.title.string.strip()
+            return re.sub(r"\s+[—\-|·]\s+[^—\-|·]*$", "", title).strip()
+
         return None
     
     def extract_content(self, soup: BeautifulSoup, url: str) -> str:
@@ -237,7 +250,22 @@ class BaseIndexBuilder(ABC):
             follow_redirects=True,
             headers={"User-Agent": f"WPILib-MCP-{self.vendor}-Indexer/1.0"}
         ) as self.client:
-            for start_url in self.start_urls:
+            try:
+                seeds = [u for u in await self.seed_urls() if self.should_crawl(u)]
+            except Exception as e:
+                logger.warning(f"Page list unavailable ({e}); crawling links instead")
+                seeds = []
+
+            if seeds:
+                logger.info(f"Indexing {len(seeds)} pages from the site's page list")
+                for url in seeds:
+                    # Depth past the limit: index this page, don't follow its links
+                    await self._crawl(url, depth=self.max_depth + 1, follow_links=False)
+                    if len(self.pages) >= self.max_pages:
+                        logger.info(f"Reached max pages limit ({self.max_pages})")
+                        break
+
+            for start_url in [] if seeds else self.start_urls:
                 await self._crawl(start_url, depth=0)
                 
                 if len(self.pages) >= self.max_pages:
@@ -253,9 +281,9 @@ class BaseIndexBuilder(ABC):
             "pages": [asdict(p) for p in self.pages]
         }
     
-    async def _crawl(self, url: str, depth: int) -> None:
+    async def _crawl(self, url: str, depth: int, follow_links: bool = True) -> None:
         """Recursively crawl URLs."""
-        if depth > self.max_depth:
+        if follow_links and depth > self.max_depth:
             return
         
         if url in self.visited:
@@ -268,7 +296,8 @@ class BaseIndexBuilder(ABC):
             return
         
         self.visited.add(url)
-        
+        await asyncio.sleep(self.rate_limit)
+
         try:
             logger.debug(f"Fetching: {url}")
             response = await self.client.get(url)
@@ -283,10 +312,9 @@ class BaseIndexBuilder(ABC):
                 logger.info(f"Indexed: {page.title}")
             
             # Find and crawl links
-            links = self.extract_links(soup, url)
-            for link in links:
-                await self._crawl(link, depth + 1)
-                await asyncio.sleep(self.rate_limit)
+            if follow_links:
+                for link in self.extract_links(soup, url):
+                    await self._crawl(link, depth + 1)
                 
         except Exception as e:
             logger.warning(f"Error crawling {url}: {e}")

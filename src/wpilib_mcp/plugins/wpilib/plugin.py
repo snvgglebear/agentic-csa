@@ -4,7 +4,6 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
 from typing import Optional
 
 from ..base import (
@@ -17,6 +16,7 @@ from ..base import (
 from ...utils.fetch import HttpFetcher
 from ...utils.html import HtmlCleaner
 from ...utils.search import BM25SearchIndex
+from ...utils.seasons import SeasonVersions
 
 
 logger = logging.getLogger(__name__)
@@ -35,7 +35,7 @@ class IndexPage:
     content_preview: str
 
 
-class Plugin(PluginBase):
+class Plugin(SeasonVersions, PluginBase):
     """
     WPILib core documentation plugin.
     
@@ -65,7 +65,7 @@ class Plugin(PluginBase):
     
     @property
     def supported_versions(self) -> list[str]:
-        return ["2025", "2024", "2023"]
+        return ["latest"]
     
     @property
     def supported_languages(self) -> list[str]:
@@ -170,6 +170,8 @@ class Plugin(PluginBase):
         if not self._search_index.is_built:
             return []
         
+        version = self._resolve_version(version)
+
         # Define filter function
         def filter_fn(page: IndexPage) -> bool:
             if version and page.version != version:
@@ -248,8 +250,9 @@ class Plugin(PluginBase):
     ) -> list[DocSection]:
         """List available documentation sections."""
         # Use first configured version if not specified
+        version = self._resolve_version(version)
         if version is None:
-            version = self._config.versions[0] if self._config else "2025"
+            version = self._config.versions[0] if self._config else "latest"
         
         if language is None:
             language = "Java"

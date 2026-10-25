@@ -146,15 +146,25 @@ class HtmlCleaner:
             for tag in soup.find_all(tag_name):
                 tag.decompose()
         
-        # Remove elements with boilerplate classes
-        for class_pattern in self.BOILERPLATE_CLASSES:
-            for element in soup.find_all(class_=re.compile(class_pattern, re.I)):
-                element.decompose()
-        
-        # Try to find main content area
+        # Find the main content area first. Removing boilerplate across the
+        # whole page can delete the page itself: Read the Docs themes put
+        # classes like "wy-body-for-nav" on <body> and "wy-nav-content" on
+        # the wrapper that holds the article.
         content = self._find_main_content(soup)
         if content is None:
             content = soup.body if soup.body else soup
+
+        # Heading permalink marks ("¶") aren't content
+        for anchor in content.select("a.headerlink"):
+            anchor.decompose()
+
+        # Then remove boilerplate inside it, matching whole class-name parts
+        # ("nav" in "page-nav", not "ad" inside "header").
+        for element in content.find_all(class_=True):
+            if element.decomposed:
+                continue
+            if self._is_boilerplate(element.get("class", [])):
+                element.decompose()
         
         # Extract and clean text
         text = self._extract_text(content)
@@ -162,6 +172,23 @@ class HtmlCleaner:
         
         return text
     
+    @staticmethod
+    def _inline_text(element: Tag) -> str:
+        """Text of an element, keeping the spaces around links and inline code."""
+        return re.sub(r"\s+", " ", element.get_text()).strip()
+
+    def _is_boilerplate(self, classes) -> bool:
+        """True if any class name, split on - and _, has a boilerplate part."""
+        if isinstance(classes, str):
+            classes = classes.split()
+        for cls in classes:
+            cls = cls.lower()
+            if cls in self.BOILERPLATE_CLASSES:
+                return True
+            if any(part in self.BOILERPLATE_CLASSES for part in re.split(r"[-_]", cls)):
+                return True
+        return False
+
     def _find_main_content(self, soup: BeautifulSoup) -> Optional[Tag]:
         """Find the main content area using various selectors."""
         for selector in self.CONTENT_SELECTORS:
@@ -192,7 +219,7 @@ class HtmlCleaner:
                 
                 # Handle specific elements
                 if child.name in ("h1", "h2", "h3", "h4", "h5", "h6"):
-                    heading_text = child.get_text(strip=True)
+                    heading_text = self._inline_text(child)
                     if heading_text:
                         parts.append(f"\n\n## {heading_text}\n")
                 
@@ -227,7 +254,7 @@ class HtmlCleaner:
                         parts.append(f"\n{list_text}\n")
                 
                 elif child.name == "p":
-                    p_text = child.get_text(strip=True)
+                    p_text = self._inline_text(child)
                     if p_text:
                         parts.append(f"\n{p_text}\n")
                 
@@ -244,7 +271,7 @@ class HtmlCleaner:
                 
                 else:
                     # Other elements - just get text
-                    text = child.get_text(strip=True)
+                    text = self._inline_text(child)
                     if text:
                         parts.append(text)
         
